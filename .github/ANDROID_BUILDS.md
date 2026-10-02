@@ -5,7 +5,9 @@ this fork's `main` branch every four hours. Run it manually from the Actions tab
 to sync sooner. If the merge changes `apps/mobile/`, it builds a universal
 release APK and attaches it to a GitHub Release. A manual run can also set
 `force_build` to publish an APK when upstream has no new mobile changes. The
-README download link always points to the latest release.
+build copies `.env.example` to `.env` so the public T3 account configuration is
+included, then recreates the Android project and runs a clean Gradle release
+build. The README download link always points to the latest release.
 
 This repository is public, so GitHub-hosted `ubuntu-latest` runners are free and
 do not use a private-repository Actions minutes quota.

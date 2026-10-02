@@ -137,12 +137,18 @@ jobs:
             echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD"
           } >> "$GITHUB_ENV"
 
-      - name: Generate Android project
+      - name: Include public account configuration
+        run: |
+          cp .env.example .env
+          grep -q '^T3CODE_CLERK_PUBLISHABLE_KEY=pk_live_' .env
+          grep -q '^T3CODE_CLERK_JWT_TEMPLATE=' .env
+
+      - name: Generate Android project from scratch
         run: pnpm --filter @t3tools/mobile exec expo prebuild --clean --platform android
 
-      - name: Build release APK
+      - name: Clean and build release APK
         working-directory: apps/mobile/android
-        run: ./gradlew --no-daemon assembleRelease
+        run: ./gradlew --no-daemon clean assembleRelease
 
       - name: Name release asset
         run: cp apps/mobile/android/app/build/outputs/apk/release/app-release.apk t3code-universal.apk
