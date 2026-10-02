@@ -1,0 +1,141 @@
+name: Sync upstream and build Android APK
+
+on:
+  schedule:
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-android-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Merge official T3 Code
+    runs-on: ubuntu-latest
+    outputs:
+      mobile_changed: ${{ steps.merge.outputs.mobile_changed }}
+      merge_sha: ${{ steps.merge.outputs.merge_sha }}
+    steps:
+      - name: Checkout fork default branch
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge upstream and push fork
+        id: merge
+        run: |
+          git remote add upstream https://github.com/pingdotgg/t3code.git
+          git fetch upstream main
+
+          before="$(git rev-parse HEAD)"
+          if git merge-base --is-ancestor upstream/main "$before"; then
+            echo "No upstream commits to merge."
+            echo "mobile_changed=false" >> "$GITHUB_OUTPUT"
+            echo "merge_sha=$before" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-edit --no-ff upstream/main
+
+          after="$(git rev-parse HEAD)"
+          git push origin HEAD:main
+          echo "merge_sha=$after" >> "$GITHUB_OUTPUT"
+          if git diff --name-only "$before" "$after" | grep -q '^apps/mobile/'; then
+            echo "mobile_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "mobile_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-android:
+    name: Build and publish universal APK
+    needs: sync
+    if: needs.sync.outputs.mobile_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      APP_VARIANT: production
+      EXPO_NO_GIT_STATUS: "1"
+      NODE_OPTIONS: --max-old-space-size=8192
+      T3CODE_ANDROID_PACKAGE: com.jgaertig.t3code
+    steps:
+      - name: Checkout merged fork
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.sync.outputs.merge_sha }}
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=@t3tools/mobile...
+              - --filter=@t3tools/scripts...
+              - --filter=t3...
+
+      - name: Expose pnpm
+        run: |
+          pnpm_version="$(node --print "require('./package.json').packageManager.split('@').pop()")"
+          vp_pnpm_bin="$HOME/.vite-plus/package_manager/pnpm/$pnpm_version/pnpm/bin"
+          echo "$vp_pnpm_bin" >> "$GITHUB_PATH"
+          "$vp_pnpm_bin/pnpm" --version
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Prepare Android signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing required GitHub Actions secret: $name"
+              exit 1
+            fi
+          done
+
+          keystore="$RUNNER_TEMP/android-release.keystore"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          chmod 600 "$keystore"
+          {
+            echo "ANDROID_KEYSTORE_PATH=$keystore"
+            echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
+            echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS"
+            echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: Generate Android project
+        run: pnpm --filter @t3tools/mobile exec expo prebuild --clean --platform android
+
+      - name: Build release APK
+        working-directory: apps/mobile/android
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: Publish APK release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: android-${{ github.run_number }}-${{ needs.sync.outputs.merge_sha }}
+          name: Android build ${{ github.run_number }}
+          body: |
+            Automatically built from the latest upstream merge that changed `apps/mobile`.
+
+            This is a universal Android release APK signed with this fork's private signing key.
+          files: apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+          make_latest: true
