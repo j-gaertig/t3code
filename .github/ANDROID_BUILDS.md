@@ -33,6 +33,13 @@ secret** and add these four secrets:
 | `ANDROID_KEY_ALIAS` | `t3code`, or the alias you chose |
 | `ANDROID_KEY_PASSWORD` | The key password entered for `keytool` |
 
-The built app uses the package ID `com.jgaertig.t3code` so it can be installed
-alongside the official app. APK updates must continue to use the same keystore;
-losing it means Android will not install later builds as updates over this app.
+The workflow also needs an `UPSTREAM_SYNC_TOKEN` repository secret so it can
+push upstream changes that include workflow files. Create a fine-grained
+personal access token restricted to this repository, with **Contents: Read and
+write** and **Workflows: Read and write**, then save it as `UPSTREAM_SYNC_TOKEN`.
+
+The build uses T3 Code's official Android package ID, `com.t3tools.t3code`.
+Because the APK is signed with your key rather than the Play Store key, Android
+requires uninstalling the Play Store app before installing this APK. Keep using
+the same keystore for future APK updates; losing it prevents updates over this
+installation.

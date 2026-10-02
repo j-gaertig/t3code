@@ -26,11 +26,21 @@ jobs:
       mobile_changed: ${{ steps.merge.outputs.mobile_changed }}
       merge_sha: ${{ steps.merge.outputs.merge_sha }}
     steps:
+      - name: Require upstream sync token
+        env:
+          UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          if [ -z "$UPSTREAM_SYNC_TOKEN" ]; then
+            echo "::error::Add the UPSTREAM_SYNC_TOKEN repository secret. See .github/ANDROID_BUILDS.md."
+            exit 1
+          fi
+
       - name: Checkout fork default branch
         uses: actions/checkout@v6
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
 
       - name: Merge upstream and push fork
         id: merge
@@ -69,7 +79,7 @@ jobs:
       APP_VARIANT: production
       EXPO_NO_GIT_STATUS: "1"
       NODE_OPTIONS: --max-old-space-size=8192
-      T3CODE_ANDROID_PACKAGE: com.jgaertig.t3code
+      T3CODE_ANDROID_PACKAGE: com.t3tools.t3code
     steps:
       - name: Checkout merged fork
         uses: actions/checkout@v6
