@@ -10,43 +10,20 @@ module.exports = function withAndroidReleaseSigning(config) {
       return nextConfig;
     }
 
-    const androidBlock = contents.indexOf("android {");
-    if (androidBlock === -1) {
-      throw new Error(
-        "withAndroidReleaseSigning: could not find the android block in app/build.gradle.",
-      );
-    }
+    contents += `
 
-    const signingConfig = `\n  if (System.getenv("ANDROID_KEYSTORE_PATH")) {
-    signingConfigs {
-      release {
-        storeFile file(System.getenv("ANDROID_KEYSTORE_PATH"))
-        storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
-        keyAlias System.getenv("ANDROID_KEY_ALIAS")
-        keyPassword System.getenv("ANDROID_KEY_PASSWORD")
-      }
-    }
-  }\n`;
-    contents =
-      contents.slice(0, androidBlock + "android {".length) +
-      signingConfig +
-      contents.slice(androidBlock + "android {".length);
-
-    const buildTypesBlock = contents.indexOf("buildTypes {");
-    const releaseBlock = contents.indexOf("release {", buildTypesBlock);
-    if (buildTypesBlock === -1 || releaseBlock === -1) {
-      throw new Error(
-        "withAndroidReleaseSigning: could not find buildTypes.release in app/build.gradle.",
-      );
-    }
-
-    const releaseOpeningEnd = releaseBlock + "release {".length;
-    contents =
-      contents.slice(0, releaseOpeningEnd) +
-      `\n      if (System.getenv("ANDROID_KEYSTORE_PATH")) {
-        signingConfig signingConfigs.release
-      }` +
-      contents.slice(releaseOpeningEnd);
+// Apply the CI key after the Android DSL so it overrides Expo's default
+// debug signingConfig for release builds.
+if (System.getenv("ANDROID_KEYSTORE_PATH")) {
+  android.signingConfigs.create("ciRelease") {
+    storeFile file(System.getenv("ANDROID_KEYSTORE_PATH"))
+    storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+    keyAlias System.getenv("ANDROID_KEY_ALIAS")
+    keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+  }
+  android.buildTypes.release.signingConfig = android.signingConfigs.ciRelease
+}
+`;
 
     nextConfig.modResults.contents = contents;
     return nextConfig;
