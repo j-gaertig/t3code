@@ -164,7 +164,7 @@ jobs:
           fi
 
           expected_cert="$(keytool -exportcert -keystore "$ANDROID_KEYSTORE_PATH" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" | sha256sum | cut -d' ' -f1)"
-          actual_cert="$("$apksigner" verify --print-certs "$apk" | awk -F': ' '/Signer #1 certificate SHA-256 digest/ { print tolower($2); exit }')"
+          actual_cert="$("$apksigner" verify --print-certs "$apk" | awk -F': ' '/Signer #1 certificate SHA-256 digest/ { print tolower($2) }' | tr -d ':')"
           if [ -z "$actual_cert" ] || [ "$actual_cert" != "$expected_cert" ]; then
             echo "::error::APK signature does not match the configured Android keystore."
             exit 1
