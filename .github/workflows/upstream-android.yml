@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: "0 */4 * * *"
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: Build an APK even when upstream has no new mobile changes
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -56,7 +62,7 @@ jobs:
   build-android:
     name: Build and publish universal APK
     needs: sync
-    if: needs.sync.outputs.mobile_changed == 'true'
+    if: needs.sync.outputs.mobile_changed == 'true' || inputs.force_build
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
