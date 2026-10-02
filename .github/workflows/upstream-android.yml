@@ -128,6 +128,9 @@ jobs:
         working-directory: apps/mobile/android
         run: ./gradlew --no-daemon assembleRelease
 
+      - name: Name release asset
+        run: cp apps/mobile/android/app/build/outputs/apk/release/app-release.apk t3code-universal.apk
+
       - name: Publish APK release
         uses: softprops/action-gh-release@v3
         with:
@@ -137,5 +140,5 @@ jobs:
             Automatically built from the latest upstream merge that changed `apps/mobile`.
 
             This is a universal Android release APK signed with this fork's private signing key.
-          files: apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+          files: t3code-universal.apk
           make_latest: true
