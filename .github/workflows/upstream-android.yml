@@ -150,6 +150,34 @@ jobs:
         working-directory: apps/mobile/android
         run: ./gradlew --no-daemon clean assembleRelease
 
+      - name: Verify package, signing key, and universal APK
+        run: |
+          apk="apps/mobile/android/app/build/outputs/apk/release/app-release.apk"
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
+          aapt="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -1)"
+          test -f "$apk" && test -x "$apksigner" && test -x "$aapt"
+
+          package="$("$aapt" dump badging "$apk" | awk -F "'" '/^package: name=/ { print $2; exit }')"
+          if [ "$package" != "com.t3tools.t3code" ]; then
+            echo "::error::Unexpected Android package ID: $package"
+            exit 1
+          fi
+
+          expected_cert="$(keytool -exportcert -keystore "$ANDROID_KEYSTORE_PATH" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" -keypass "$ANDROID_KEY_PASSWORD" | sha256sum | cut -d' ' -f1)"
+          actual_cert="$("$apksigner" verify --print-certs "$apk" | awk -F': ' '/Signer #1 certificate SHA-256 digest/ { print tolower($2); exit }')"
+          if [ -z "$actual_cert" ] || [ "$actual_cert" != "$expected_cert" ]; then
+            echo "::error::APK signature does not match the configured Android keystore."
+            exit 1
+          fi
+
+          abis="$(unzip -Z1 "$apk" | awk -F/ '$1 == "lib" && NF > 2 { print $2 }' | sort -u | paste -sd, -)"
+          abi_count="$(printf '%s' "$abis" | awk -F, '{ print NF }')"
+          if [ "$abi_count" -lt 2 ]; then
+            echo "::error::Expected a universal APK with multiple native ABIs; found: $abis"
+            exit 1
+          fi
+          echo "Verified package=$package ABIs=$abis signingCertificateSHA256=$actual_cert"
+
       - name: Name release asset
         run: cp apps/mobile/android/app/build/outputs/apk/release/app-release.apk t3code-universal.apk
 
