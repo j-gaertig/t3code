@@ -6,8 +6,14 @@ to sync sooner. If the merge changes `apps/mobile/`, it builds a universal
 release APK and attaches it to a GitHub Release. A manual run can also set
 `force_build` to publish an APK when upstream has no new mobile changes. The
 build copies `.env.example` to `.env` so the public T3 account configuration is
-included, then recreates the Android project and runs a clean Gradle release
-build. The README download link always points to the latest release.
+included, then recreates the Android project and runs a Gradle release
+build. The build is incremental on purpose (no `clean`, parallel tasks, warm
+Gradle/pnpm caches) so it stays on free runners: every run still starts from a
+fresh checkout and a fresh `expo prebuild --clean`, so the `.env` account
+config always ends up in the APK. Each release body lists the `apps/mobile`
+commits in the merged range (or since the previous Android release for
+`force_build`) with a compare link. The README download link always points to
+the latest release.
 
 This repository is public, so GitHub-hosted `ubuntu-latest` runners are free and
 do not use a private-repository Actions minutes quota.

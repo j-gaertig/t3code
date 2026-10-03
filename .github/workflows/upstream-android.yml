@@ -13,6 +13,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: upstream-android-sync
@@ -25,6 +26,7 @@ jobs:
     outputs:
       mobile_changed: ${{ steps.merge.outputs.mobile_changed }}
       merge_sha: ${{ steps.merge.outputs.merge_sha }}
+      before_sha: ${{ steps.merge.outputs.before_sha }}
     steps:
       - name: Require upstream sync token
         env:
@@ -40,6 +42,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          fetch-tags: true
           token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
 
       - name: Merge upstream and push fork
@@ -52,6 +55,7 @@ jobs:
           if git merge-base --is-ancestor upstream/main "$before"; then
             echo "No upstream commits to merge."
             echo "mobile_changed=false" >> "$GITHUB_OUTPUT"
+            echo "before_sha=$before" >> "$GITHUB_OUTPUT"
             echo "merge_sha=$before" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -62,12 +66,72 @@ jobs:
 
           after="$(git rev-parse HEAD)"
           git push origin HEAD:main
+          echo "before_sha=$before" >> "$GITHUB_OUTPUT"
           echo "merge_sha=$after" >> "$GITHUB_OUTPUT"
           if git diff --name-only "$before" "$after" | grep -q '^apps/mobile/'; then
             echo "mobile_changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "mobile_changed=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Collect mobile commits for release notes
+        id: notes
+        if: steps.merge.outputs.mobile_changed == 'true' || inputs.force_build
+        run: |
+          set -euo pipefail
+          before="${{ steps.merge.outputs.before_sha }}"
+          after="${{ steps.merge.outputs.merge_sha }}"
+          out="mobile-release-notes.md"
+          max=50
+
+          if [ "${{ steps.merge.outputs.mobile_changed }}" = "true" ]; then
+            commits="$(git log --format='%H%x1f%h%x1f%an%x1f%s' "${before}..${after}" -- apps/mobile || true)"
+            range_desc="upstream merge \`${before:0:7}\`...\`${after:0:7}\`"
+          else
+            last_tag="$(git describe --tags --match 'android-*' --abbrev=0 2>/dev/null || true)"
+            if [ -n "$last_tag" ]; then
+              commits="$(git log --format='%H%x1f%h%x1f%an%x1f%s' "${last_tag}..${after}" -- apps/mobile || true)"
+              range_desc="changes since last Android release \`${last_tag}\`"
+            else
+              commits="$(git log -n "$max" --format='%H%x1f%h%x1f%an%x1f%s' "$after" -- apps/mobile || true)"
+              range_desc="latest mobile commits (no previous Android release found)"
+            fi
+          fi
+          compare="https://github.com/pingdotgg/t3code/compare/${before}...${after}"
+
+          {
+            echo "### Mobile changes (\`apps/mobile\`)"
+            echo
+            echo "Range: $range_desc"
+            echo
+            echo "Compare: $compare"
+            echo
+            if [ -z "$commits" ]; then
+              echo "No mobile commits in this range."
+            else
+              total="$(printf '%s\n' "$commits" | grep -c '[^[:space:]]' || true)"
+              echo "$total commit(s):"
+              echo
+              sep="$(printf '\037')"
+              printf '%s\n' "$commits" | head -n "$max" | while IFS="$sep" read -r full short author subject; do
+                [ -n "$full" ] || continue
+                printf -- '- `%s` %s — %s ([commit](https://github.com/pingdotgg/t3code/commit/%s))\n' "$short" "$subject" "$author" "$full"
+              done
+              if [ "$total" -gt "$max" ]; then
+                echo
+                echo "…and $((total - max)) more — see compare link above."
+              fi
+            fi
+          } > "$out"
+
+      - name: Upload mobile release notes
+        if: steps.merge.outputs.mobile_changed == 'true' || inputs.force_build
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-release-notes
+          path: mobile-release-notes.md
+          retention-days: 7
+          if-no-files-found: error
 
   build-android:
     name: Build and publish universal APK
@@ -86,6 +150,12 @@ jobs:
         with:
           ref: ${{ needs.sync.outputs.merge_sha }}
 
+      - name: Download mobile release notes
+        uses: actions/download-artifact@v4
+        with:
+          name: mobile-release-notes
+          path: .release
+
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
         with:
@@ -96,6 +166,7 @@ jobs:
               - --filter=@t3tools/mobile...
               - --filter=@t3tools/scripts...
               - --filter=t3...
+              - --prefer-offline
 
       - name: Expose pnpm
         run: |
@@ -146,9 +217,15 @@ jobs:
       - name: Generate Android project from scratch
         run: pnpm --filter @t3tools/mobile exec expo prebuild --clean --platform android
 
-      - name: Clean and build release APK
+      # Incremental build on purpose: the runner is ephemeral and
+      # `expo prebuild --clean` above regenerates `android/` (including the
+      # `.env` account config), so changed inputs still rebuild. `clean` would
+      # only wipe the Gradle cache and force a full native recompile.
+      - name: Build release APK (incremental, cached)
         working-directory: apps/mobile/android
-        run: ./gradlew --no-daemon clean assembleRelease
+        env:
+          GRADLE_OPTS: -Dorg.gradle.caching=true -Dorg.gradle.parallel=true
+        run: ./gradlew assembleRelease --parallel -x lint -x test
 
       - name: Verify package, signing key, and universal APK
         run: |
@@ -181,14 +258,25 @@ jobs:
       - name: Name release asset
         run: cp apps/mobile/android/app/build/outputs/apk/release/app-release.apk t3code-universal.apk
 
+      - name: Compose release body
+        env:
+          MERGE_SHA: ${{ needs.sync.outputs.merge_sha }}
+        run: |
+          {
+            printf 'Automatically built from upstream merge `%s`.\n' "$MERGE_SHA"
+            echo
+            echo "This is a universal Android release APK signed with this fork's private signing key."
+            if [ -f .release/mobile-release-notes.md ]; then
+              echo
+              cat .release/mobile-release-notes.md
+            fi
+          } > release-body.md
+
       - name: Publish APK release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: android-${{ github.run_number }}-${{ needs.sync.outputs.merge_sha }}
           name: Android build ${{ github.run_number }}
-          body: |
-            Automatically built from the latest upstream merge that changed `apps/mobile`.
-
-            This is a universal Android release APK signed with this fork's private signing key.
+          body_path: release-body.md
           files: t3code-universal.apk
           make_latest: true
