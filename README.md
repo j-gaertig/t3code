@@ -4,7 +4,7 @@
 >   <img src="https://forthebadge.com/api/badges/generate?panels=2&primaryLabel=Download+APK&secondaryLabel=universal&primaryBGColor=%2331C4F3&primaryTextColor=%23FFFFFF&secondaryBGColor=%23389AD5&secondaryTextColor=%23FFFFFF&primaryFontSize=12&primaryFontWeight=600&primaryLetterSpacing=2&primaryFontFamily=Roboto&primaryTextTransform=uppercase&secondaryFontSize=12&secondaryFontWeight=900&secondaryLetterSpacing=0&secondaryFontFamily=Verdana&secondaryTextTransform=lowercase&borderRadius=5" alt="Download APK">
 > </a>
 >
-> **Automated Android builds:** This fork syncs with the official T3 Code repository every four hours and on demand. Download the latest universal Android APK from [here](https://github.com/j-gaertig/t3code/releases/latest/download/t3code-universal.apk).
+> **Automated Android builds:** This fork syncs with the official T3 Code repository every four hours and builds the latest Android APK. Download the latest universal APK [here](https://github.com/j-gaertig/t3code/releases/latest/download/t3code-universal.apk).
 > 
 
 # T3 Code
