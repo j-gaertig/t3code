@@ -1,0 +1,372 @@
+name: Build Android APK from upstream
+
+on:
+  # ghacron: "0 */1 * * *"
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: Build an APK even when upstream has no new mobile changes
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: preview-apk-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Rebase upstream mirror
+    runs-on: ubuntu-latest
+    outputs:
+      mobile_changed: ${{ steps.rebase.outputs.mobile_changed }}
+      upstream_old: ${{ steps.rebase.outputs.upstream_old }}
+      upstream_new: ${{ steps.rebase.outputs.upstream_new }}
+    steps:
+      - name: Require upstream sync token
+        env:
+          UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          if [ -z "$UPSTREAM_SYNC_TOKEN" ]; then
+            echo "::error::Add the UPSTREAM_SYNC_TOKEN repository secret (Contents: read+write, Workflows: read+write)."
+            exit 1
+          fi
+
+      - name: Checkout upstream branch
+        uses: actions/checkout@v6
+        with:
+          ref: upstream
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+
+      - name: Rebase onto official T3 Code (no merges)
+        id: rebase
+        run: |
+          git remote add official https://github.com/pingdotgg/t3code.git 2>/dev/null || true
+          git fetch official main
+
+          old="$(git rev-parse HEAD)"
+          new="$(git rev-parse official/main)"
+
+          echo "upstream_old=$old" >> "$GITHUB_OUTPUT"
+          if [ "$old" = "$new" ]; then
+            echo "Already up to date at $old."
+            echo "mobile_changed=false" >> "$GITHUB_OUTPUT"
+            echo "upstream_new=$old" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Pure mirror: no fork commits on this branch, so rebase == fast-forward.
+          # --ff-only guarantees we never create a merge commit here.
+          git merge --ff-only "official/main"
+          git push origin HEAD:upstream
+
+          echo "upstream_new=$new" >> "$GITHUB_OUTPUT"
+          if git diff --name-only "$old" "$new" | grep -q '^apps/mobile/'; then
+            echo "mobile_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "mobile_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Collect mobile commits for release notes (no merges)
+        id: notes
+        if: steps.rebase.outputs.mobile_changed == 'true' || inputs.force_build
+        run: |
+          set -euo pipefail
+          old="${{ steps.rebase.outputs.upstream_old }}"
+          new="${{ steps.rebase.outputs.upstream_new }}"
+          out="mobile-release-notes.md"
+          max=50
+
+          if [ "${{ steps.rebase.outputs.mobile_changed }}" = "true" ]; then
+            commits="$(git log --no-merges --first-parent --format='%H%x1f%h%x1f%an%x1f%s' "${old}..${new}" -- apps/mobile || true)"
+            range_desc="upstream \`${old:0:7}\`...\`${new:0:7}\`"
+          else
+            last_tag="$(git describe --tags --match 'android-*' --abbrev=0 2>/dev/null || true)"
+            if [ -n "$last_tag" ]; then
+              commits="$(git log --no-merges --first-parent --format='%H%x1f%h%x1f%an%x1f%s' "${last_tag}..${new}" -- apps/mobile || true)"
+              range_desc="changes since last Android release \`${last_tag}\`"
+            else
+              commits="$(git log --no-merges --first-parent -n "$max" --format='%H%x1f%h%x1f%an%x1f%s' "$new" -- apps/mobile || true)"
+              range_desc="latest mobile commits (no previous Android release found)"
+            fi
+          fi
+          compare="https://github.com/pingdotgg/t3code/compare/${old}...${new}"
+
+          {
+            echo "### Mobile changes (\`apps/mobile\`, no merges)"
+            echo
+            echo "Range: $range_desc"
+            echo
+            echo "Compare: $compare"
+            echo
+            if [ -z "$commits" ]; then
+              echo "No mobile commits in this range."
+            else
+              total="$(printf '%s\n' "$commits" | grep -c '[^[:space:]]' || true)"
+              echo "$total commit(s):"
+              echo
+              sep="$(printf '\037')"
+              printf '%s\n' "$commits" | head -n "$max" | while IFS="$sep" read -r full short author subject; do
+                [ -n "$full" ] || continue
+                printf -- '- `%s` %s — %s ([commit](https://github.com/pingdotgg/t3code/commit/%s))\n' "$short" "$subject" "$author" "$full"
+              done
+              if [ "$total" -gt "$max" ]; then
+                echo
+                echo "…and $((total - max)) more — see compare link above."
+              fi
+            fi
+          } > "$out"
+
+      - name: Upload mobile release notes
+        if: steps.rebase.outputs.mobile_changed == 'true' || inputs.force_build
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-release-notes
+          path: mobile-release-notes.md
+          retention-days: 7
+          if-no-files-found: error
+
+  build-android:
+    name: Build and publish universal APK
+    needs: sync
+    if: needs.sync.outputs.mobile_changed == 'true' || inputs.force_build
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      APP_VARIANT: production
+      EXPO_NO_GIT_STATUS: "1"
+      NODE_OPTIONS: --max-old-space-size=8192
+      T3CODE_ANDROID_PACKAGE: com.t3tools.t3code
+    steps:
+      - name: Checkout upstream at rebased SHA
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.sync.outputs.upstream_new }}
+
+      - name: Download mobile release notes
+        uses: actions/download-artifact@v4
+        with:
+          name: mobile-release-notes
+          path: .release
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=@t3tools/mobile...
+              - --filter=@t3tools/scripts...
+              - --filter=t3...
+              - --prefer-offline
+
+      - name: Expose pnpm
+        run: |
+          pnpm_version="$(node --print "require('./package.json').packageManager.split('@').pop()")"
+          vp_pnpm_bin="$HOME/.vite-plus/package_manager/pnpm/$pnpm_version/pnpm/bin"
+          echo "$vp_pnpm_bin" >> "$GITHUB_PATH"
+          "$vp_pnpm_bin/pnpm" --version
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Prepare Android signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing required GitHub Actions secret: $name"
+              exit 1
+            fi
+          done
+
+          keystore="$RUNNER_TEMP/android-release.keystore"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          chmod 600 "$keystore"
+          {
+            echo "ANDROID_KEYSTORE_PATH=$keystore"
+            echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
+            echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS"
+            echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: Include public account configuration
+        run: |
+          cp .env.example .env
+          grep -q '^T3CODE_CLERK_PUBLISHABLE_KEY=pk_live_' .env
+          grep -q '^T3CODE_CLERK_JWT_TEMPLATE=' .env
+
+      - name: Generate Android project from scratch
+        run: pnpm --filter @t3tools/mobile exec expo prebuild --clean --platform android
+
+      - name: Wire release signing key into Gradle
+        run: |
+          python3 -c "
+          import re
+          p = 'apps/mobile/android/app/build.gradle'
+          s = open(p).read()
+          sc = s.index('signingConfigs')
+          m = re.search(\"keyPassword 'android'\n *}\", s[sc:])
+          assert m, 'debug signing block close not found'
+          e = sc + m.end()
+          ins = '''
+                  forkRelease {
+                      storeFile file(System.getenv('ANDROID_KEYSTORE_PATH'))
+                      storePassword System.getenv('ANDROID_KEYSTORE_PASSWORD')
+                      keyAlias System.getenv('ANDROID_KEY_ALIAS')
+                      keyPassword System.getenv('ANDROID_KEY_PASSWORD')
+                  }'''
+          s = s[:e] + ins + s[e:]
+          bt = s.index('buildTypes {')
+          rel = s.index('release {', bt)
+          old = 'signingConfig signingConfigs.debug'
+          k = s.index(old, rel)
+          s = s[:k] + 'signingConfig signingConfigs.forkRelease' + s[k+len(old):]
+          open(p, 'w').write(s)
+          print('release signing wired to ANDROID_KEYSTORE_* env')
+          "
+          grep -n -A8 'forkRelease' apps/mobile/android/app/build.gradle | head -14
+
+      - name: Build release APK (incremental, cached)
+        working-directory: apps/mobile/android
+        env:
+          GRADLE_OPTS: -Dorg.gradle.caching=true -Dorg.gradle.parallel=true
+        run: ./gradlew assembleRelease --parallel -x lint -x test
+
+      - name: Verify package, signing key, and universal APK
+        id: verify
+        run: |
+          apk="apps/mobile/android/app/build/outputs/apk/release/app-release.apk"
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
+          aapt="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -1)"
+          test -f "$apk" && test -x "$apksigner" && test -x "$aapt"
+
+          package="$("$aapt" dump badging "$apk" | awk -F "'" '/^package: name=/ { print $2; exit }')"
+          if [ "$package" != "com.t3tools.t3code" ]; then
+            echo "::error::Unexpected Android package ID: $package"
+            exit 1
+          fi
+
+          version_name="$("$aapt" dump badging "$apk" | sed -nE "s/.*versionName='([^']+)'.*/\1/p" | head -n 1)"
+          version_code="$("$aapt" dump badging "$apk" | sed -nE "s/.*versionCode='([^']+)'.*/\1/p" | head -n 1)"
+
+          expected_cert="$(keytool -exportcert -keystore "$ANDROID_KEYSTORE_PATH" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" | sha256sum | cut -d' ' -f1)"
+          actual_cert="$("$apksigner" verify --print-certs "$apk" | sed -nE 's/.*SHA-256 digest:[[:space:]]*//p' | head -n 1 | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+          if [ -z "$actual_cert" ] || [ "$actual_cert" != "$expected_cert" ]; then
+            echo "::error::APK signature does not match the configured Android keystore (expected certificate SHA-256: $expected_cert; APK certificate SHA-256: ${actual_cert:-missing})."
+            echo "--- apksigner output ---"
+            "$apksigner" verify --print-certs "$apk" || true
+            echo "--- keystore aliases ---"
+            keytool -list -keystore "$ANDROID_KEYSTORE_PATH" -storepass "$ANDROID_KEYSTORE_PASSWORD" || true
+            exit 1
+          fi
+
+          abis="$(unzip -Z1 "$apk" | awk -F/ '$1 == "lib" && NF > 2 { print $2 }' | sort -u | paste -sd, -)"
+          abi_count="$(printf '%s' "$abis" | awk -F, '{ print NF }')"
+          if [ "$abi_count" -lt 2 ]; then
+            echo "::error::Expected a universal APK with multiple native ABIs; found: $abis"
+            exit 1
+          fi
+
+          sha256="$(sha256sum "$apk" | cut -d' ' -f1)"
+          size_bytes="$(stat -c%s "$apk")"
+          size_human="$(du -h "$apk" | cut -f1)"
+
+          echo "Verified package=$package versionName=$version_name versionCode=$version_code ABIs=$abis signingCertificateSHA256=$actual_cert"
+          {
+            echo "apk_package=$package"
+            echo "apk_version_name=$version_name"
+            echo "apk_version_code=$version_code"
+            echo "apk_abis=$abis"
+            echo "apk_cert_sha256=$actual_cert"
+            echo "apk_sha256=$sha256"
+            echo "apk_size_bytes=$size_bytes"
+            echo "apk_size_human=$size_human"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Name release asset
+        run: cp apps/mobile/android/app/build/outputs/apk/release/app-release.apk t3code-universal.apk
+
+      - name: Compose release body
+        env:
+          UPSTREAM_OLD: ${{ needs.sync.outputs.upstream_old }}
+          UPSTREAM_NEW: ${{ needs.sync.outputs.upstream_new }}
+          APK_PACKAGE: ${{ steps.verify.outputs.apk_package }}
+          APK_VERSION_NAME: ${{ steps.verify.outputs.apk_version_name }}
+          APK_VERSION_CODE: ${{ steps.verify.outputs.apk_version_code }}
+          APK_ABIS: ${{ steps.verify.outputs.apk_abis }}
+          APK_CERT_SHA256: ${{ steps.verify.outputs.apk_cert_sha256 }}
+          APK_SHA256: ${{ steps.verify.outputs.apk_sha256 }}
+          APK_SIZE_HUMAN: ${{ steps.verify.outputs.apk_size_human }}
+          APK_SIZE_BYTES: ${{ steps.verify.outputs.apk_size_bytes }}
+        run: |
+          {
+            echo "Built from \`upstream\` branch at \`$UPSTREAM_NEW\` (official range \`${UPSTREAM_OLD:0:7}\`...\`${UPSTREAM_NEW:0:7}\`)."
+            echo
+            echo "Universal Android release APK, signed with this fork's private key (not the Play Store key). Uninstall the Play Store app before installing."
+            echo
+            echo "### APK metadata"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| package | \`$APK_PACKAGE\` |"
+            echo "| versionName | \`$APK_VERSION_NAME\` |"
+            echo "| versionCode | \`$APK_VERSION_CODE\` |"
+            echo "| size | $APK_SIZE_HUMAN (\`$APK_SIZE_BYTES\` bytes) |"
+            echo "| SHA-256 | \`$APK_SHA256\` |"
+            echo "| ABIs | \`$APK_ABIS\` |"
+            echo "| signing cert SHA-256 | \`$APK_CERT_SHA256\` |"
+            echo "| upstream | [\`${UPSTREAM_OLD:0:7}...${UPSTREAM_NEW:0:7}\`](https://github.com/pingdotgg/t3code/compare/${UPSTREAM_OLD}...${UPSTREAM_NEW}) |"
+            if [ -f .release/mobile-release-notes.md ]; then
+              echo
+              cat .release/mobile-release-notes.md
+            fi
+            echo
+            echo "Retention: only the latest release plus the 3 previous APKs are kept; older releases are deleted automatically."
+          } > release-body.md
+
+      - name: Publish APK release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: android-${{ github.run_number }}-${{ needs.sync.outputs.upstream_new }}
+          name: Android build ${{ github.run_number }}
+          body_path: release-body.md
+          files: t3code-universal.apk
+          make_latest: true
+
+      - name: Prune old releases (keep latest + 3)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          keep=4
+          current="android-${{ github.run_number }}-${{ needs.sync.outputs.upstream_new }}"
+          mapfile -t old_tags < <(gh release list --limit 100 --json tagName,publishedAt --jq 'sort_by(.publishedAt) | reverse | .[4:] | .[].tagName' | grep -v -x "$current" || true)
+          if [ "${#old_tags[@]}" -eq 0 ]; then
+            echo "Nothing to prune."
+            exit 0
+          fi
+          for tag in "${old_tags[@]}"; do
+            [ -n "$tag" ] || continue
+            echo "Deleting old release $tag"
+            gh release delete "$tag" --yes || true
+            git push --delete origin "$tag" || true
+          done
