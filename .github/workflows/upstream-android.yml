@@ -1,8 +1,7 @@
 name: Sync upstream and build Android APK
 
 on:
-  schedule:
-    - cron: "0 */4 * * *"
+  # ghacron: "0 */1 * * *"
   workflow_dispatch:
     inputs:
       force_build:
