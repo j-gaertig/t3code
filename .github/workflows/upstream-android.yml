@@ -1,7 +1,7 @@
 name: Sync upstream and build Android APK
 
 on:
-  # ghacron: "11 */1 * * *"
+  # ghacron: "18 */1 * * *"
   workflow_dispatch:
     inputs:
       force_build:
